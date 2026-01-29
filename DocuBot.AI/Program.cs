@@ -1,5 +1,6 @@
-﻿
-using System.Text.RegularExpressions;
+﻿using System;
+using System.IO;
+using Serilog;
 
 namespace DocuBot.AI
 {
@@ -7,58 +8,91 @@ namespace DocuBot.AI
     {
         static int Main(string[] args)
         {
-            if (args.Length != 1)
+            // Cross-platform log path
+            var logDir = Path.Combine(Path.GetPathRoot(Environment.SystemDirectory) ?? "/", "Logs", "DocuBot.GitAgent");
+            var logFile = Path.Combine(logDir, "git-agent-.log");
+
+            try
             {
-                Console.Error.WriteLine("Usage: DocuBot.AI <commit-message-file>");
-                return 1;
+                Log.Logger = new LoggerConfiguration()
+                    .MinimumLevel.Information()
+                    .WriteTo.File(
+                        path: logFile,
+                        rollingInterval: RollingInterval.Day,
+                        retainedFileCountLimit: 14,
+                        outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}",
+                        shared: true
+                    )
+                    .CreateLogger();
+            }
+            catch
+            {
+                // Logging failures should not break the app
             }
 
-            string filePath = args[0];
-            if (!File.Exists(filePath))
+            Log.Information("Application start");
+
+            int exitCode = 1;
+            try
             {
-                Console.Error.WriteLine($"Error: File not found: {filePath}");
-                return 1;
-            }
+                if (args is null || args.Length != 1 || string.IsNullOrWhiteSpace(args[0]))
+                {
+                    Console.Error.WriteLine("❌ Usage: DocuBot.AI <commit-message-file>");
+                    Log.Error("No commit message file path provided.");
+                    return 1;
+                }
 
-            string commitMessage = File.ReadAllText(filePath).Trim();
-            var validator = new CommitMessageValidator();
-            if (validator.IsValid(commitMessage))
+                string filePath = args[0] ?? string.Empty;
+                Log.Information("Commit message file path received: {FilePath}", filePath);
+
+                if (!File.Exists(filePath))
+                {
+                    Console.Error.WriteLine($"❌ File not found: {filePath}");
+                    Log.Error("File not found: {FilePath}", filePath);
+                    return 1;
+                }
+
+                string commitMessage;
+                try
+                {
+                    commitMessage = File.ReadAllText(filePath)?.Trim() ?? string.Empty;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"❌ Error reading file: {ex.Message}");
+                    Log.Error(ex, "Error reading commit message file: {FilePath}", filePath);
+                    return 1;
+                }
+
+                var validator = new CommitMessageValidator();
+                if (validator.IsValid(commitMessage))
+                {
+                    Log.Information("Commit message validation succeeded.");
+                    exitCode = 0;
+                }
+                else
+                {
+                    Log.Warning("Commit message validation failed.");
+                    Console.Error.WriteLine("❌ Invalid commit message format.");
+                    Console.Error.WriteLine($"   Message: '{commitMessage}'");
+                    Console.Error.WriteLine("   Example: feat(parser): add ability to parse arrays");
+                    string suggestion = validator.GetSuggestedMessage(commitMessage);
+                    Console.Error.WriteLine($"🤖 Suggestion: {suggestion}");
+                    Log.Information("Suggested commit message: {Suggestion}", suggestion);
+                    exitCode = 1;
+                }
+            }
+            catch (Exception ex)
             {
-                return 0;
+                Log.Error(ex, "Unhandled exception in application.");
+                exitCode = 1;
             }
-            else
+            finally
             {
-                Console.Error.WriteLine("\u001b[31mCommit message does not follow Conventional Commits format.\u001b[0m");
-                Console.Error.WriteLine($"Message: '{commitMessage}'\n");
-                Console.Error.WriteLine("Example format: 'feat(parser): add ability to parse arrays'\n");
-                string suggestion = validator.Suggest(commitMessage);
-                Console.Error.WriteLine($"Suggested commit message: {suggestion}");
-                return 1;
+                Log.Information("Application exit with code {ExitCode}", exitCode);
+                Log.CloseAndFlush();
             }
-        }
-    }
-
-    public class CommitMessageValidator
-    {
-        // Conventional Commits: type(scope?): subject
-        private static readonly Regex ConventionalRegex = new(
-            @"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([\w\-\.]+\))?: .+",
-            RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
-        public bool IsValid(string message)
-        {
-            if (string.IsNullOrWhiteSpace(message)) return false;
-            var firstLine = message.Split('\n')[0].Trim();
-            return ConventionalRegex.IsMatch(firstLine);
-        }
-
-        public string Suggest(string message)
-        {
-            // Try to extract a subject, fallback to a generic suggestion
-            string subject = message.Split('\n')[0].Trim();
-            if (string.IsNullOrWhiteSpace(subject))
-                subject = "describe your change";
-            return $"feat: {subject.ToLowerInvariant()}";
+            return exitCode;
         }
     }
 }
